@@ -343,12 +343,24 @@ export async function sendMessageToConversation(
     sendLanguage = resolved.language;
   }
 
+  // YCloud requires the sender's phone number in E.164 format as the `from` field.
+  // Stored in whatsapp_config.display_phone_number when the user configured WhatsApp.
+  const ycloudFrom = (config as Record<string, unknown>).display_phone_number as string | undefined
+  if (process.env.YCLOUD_API_KEY && !ycloudFrom) {
+    throw new SendMessageError(
+      'whatsapp_not_configured',
+      'WhatsApp display_phone_number not configured. Save your phone number in Settings → WhatsApp.',
+      400
+    );
+  }
+
   const attempt = async (phone: string): Promise<string> => {
     const useYCloud = !!process.env.YCLOUD_API_KEY
 
     if (messageType === 'template') {
       if (useYCloud) {
         const result = await ycloudSendTemplateMessage({
+          from: ycloudFrom!,
           to: phone,
           templateName: templateName!,
           language: sendLanguage,
@@ -373,6 +385,7 @@ export async function sendMessageToConversation(
     if (isMediaKind) {
       if (useYCloud) {
         const result = await ycloudSendMediaMessage({
+          from: ycloudFrom!,
           to: phone,
           kind: messageType as MediaKind,
           link: mediaUrl!,
@@ -399,6 +412,7 @@ export async function sendMessageToConversation(
       if (useYCloud) {
         if (p.kind === 'buttons') {
           const result = await ycloudSendInteractiveButtons({
+            from: ycloudFrom!,
             to: phone,
             body: p.body,
             buttons: p.buttons.map((b) => ({
@@ -410,6 +424,7 @@ export async function sendMessageToConversation(
           return result.messageId;
         }
         const result = await ycloudSendInteractiveList({
+          from: ycloudFrom!,
           to: phone,
           body: p.body,
           buttonText: p.button_label,
@@ -449,6 +464,7 @@ export async function sendMessageToConversation(
     }
     if (useYCloud) {
       const result = await ycloudSendTextMessage({
+        from: ycloudFrom!,
         to: phone,
         text: contentText!,
         contextMessageId,

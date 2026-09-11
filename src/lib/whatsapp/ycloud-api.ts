@@ -7,8 +7,9 @@
  * API Base: https://api.ycloud.com/v2
  * Auth: X-API-Key header
  *
- * YCloud send endpoint: POST /v2/whatsapp/messages
- * Request body is similar to Meta's but wrapped in YCloud's envelope.
+ * Key difference from Meta: YCloud requires a `from` field (sender phone
+ * in E.164 format) in every request body. Meta embeds the phone_number_id
+ * in the URL instead.
  */
 
 const YCLOUD_API_BASE = 'https://api.ycloud.com/v2'
@@ -55,22 +56,21 @@ function ycloudHeaders(): Record<string, string> {
 // ============================================================
 
 export interface YCloudSendTextArgs {
+  /** Sender phone in E.164 format (e.g. "+5493571345450"). */
+  from: string
   to: string
   text: string
   contextMessageId?: string
 }
 
-/**
- * Send a text message via YCloud API.
- */
 export async function ycloudSendTextMessage(
   args: YCloudSendTextArgs
 ): Promise<YCloudSendResult> {
-  const { to, text, contextMessageId } = args
+  const { from, to, text, contextMessageId } = args
   const url = `${YCLOUD_API_BASE}/whatsapp/messages`
 
   const body: Record<string, unknown> = {
-    recipient_type: 'individual',
+    from,
     to,
     type: 'text',
     text: { body: text },
@@ -89,7 +89,6 @@ export async function ycloudSendTextMessage(
     await throwYCloudError(response, `YCloud API error: ${response.status}`)
   }
   const data = await response.json()
-  // YCloud returns { id: "xxx" } or { messages: [{ id: "xxx" }] }
   const messageId = data.messages?.[0]?.id || data.id || `ycloud_${Date.now()}`
   return { messageId }
 }
@@ -101,6 +100,7 @@ export async function ycloudSendTextMessage(
 export type YCloudMediaKind = 'image' | 'video' | 'document' | 'audio'
 
 export interface YCloudSendMediaArgs {
+  from: string
   to: string
   kind: YCloudMediaKind
   link: string
@@ -109,13 +109,10 @@ export interface YCloudSendMediaArgs {
   contextMessageId?: string
 }
 
-/**
- * Send a media message (image, video, document, audio) via YCloud API.
- */
 export async function ycloudSendMediaMessage(
   args: YCloudSendMediaArgs
 ): Promise<YCloudSendResult> {
-  const { to, kind, link, caption, filename, contextMessageId } = args
+  const { from, to, kind, link, caption, filename, contextMessageId } = args
   if (!link) throw new Error('ycloudSendMediaMessage requires a link.')
   const url = `${YCLOUD_API_BASE}/whatsapp/messages`
 
@@ -124,7 +121,7 @@ export async function ycloudSendMediaMessage(
   if (kind === 'document' && filename) media.filename = filename
 
   const body: Record<string, unknown> = {
-    recipient_type: 'individual',
+    from,
     to,
     type: kind,
     [kind]: media,
@@ -150,6 +147,7 @@ export async function ycloudSendMediaMessage(
 // ============================================================
 
 export interface YCloudSendTemplateArgs {
+  from: string
   to: string
   templateName: string
   language?: string
@@ -157,13 +155,10 @@ export interface YCloudSendTemplateArgs {
   contextMessageId?: string
 }
 
-/**
- * Send a template message via YCloud API.
- */
 export async function ycloudSendTemplateMessage(
   args: YCloudSendTemplateArgs
 ): Promise<YCloudSendResult> {
-  const { to, templateName, language = 'en_US', params, contextMessageId } = args
+  const { from, to, templateName, language = 'en_US', params, contextMessageId } = args
   const url = `${YCLOUD_API_BASE}/whatsapp/messages`
 
   const templatePayload: Record<string, unknown> = {
@@ -181,7 +176,7 @@ export async function ycloudSendTemplateMessage(
   }
 
   const body: Record<string, unknown> = {
-    recipient_type: 'individual',
+    from,
     to,
     type: 'template',
     template: templatePayload,
@@ -207,23 +202,21 @@ export async function ycloudSendTemplateMessage(
 // ============================================================
 
 export interface YCloudSendInteractiveButtonsArgs {
+  from: string
   to: string
   body: string
   buttons: Array<{ type: 'reply'; reply: { id: string; title: string } }>
   contextMessageId?: string
 }
 
-/**
- * Send interactive buttons via YCloud API.
- */
 export async function ycloudSendInteractiveButtons(
   args: YCloudSendInteractiveButtonsArgs
 ): Promise<YCloudSendResult> {
-  const { to, body: bodyText, buttons, contextMessageId } = args
+  const { from, to, body: bodyText, buttons, contextMessageId } = args
   const url = `${YCLOUD_API_BASE}/whatsapp/messages`
 
   const msgBody: Record<string, unknown> = {
-    recipient_type: 'individual',
+    from,
     to,
     type: 'interactive',
     interactive: {
@@ -249,6 +242,7 @@ export async function ycloudSendInteractiveButtons(
 }
 
 export interface YCloudSendInteractiveListArgs {
+  from: string
   to: string
   body: string
   buttonText: string
@@ -259,17 +253,14 @@ export interface YCloudSendInteractiveListArgs {
   contextMessageId?: string
 }
 
-/**
- * Send an interactive list via YCloud API.
- */
 export async function ycloudSendInteractiveList(
   args: YCloudSendInteractiveListArgs
 ): Promise<YCloudSendResult> {
-  const { to, body: bodyText, buttonText, sections, contextMessageId } = args
+  const { from, to, body: bodyText, buttonText, sections, contextMessageId } = args
   const url = `${YCLOUD_API_BASE}/whatsapp/messages`
 
   const msgBody: Record<string, unknown> = {
-    recipient_type: 'individual',
+    from,
     to,
     type: 'interactive',
     interactive: {
@@ -299,22 +290,20 @@ export async function ycloudSendInteractiveList(
 // ============================================================
 
 export interface YCloudSendReactionArgs {
+  from: string
   to: string
   messageId: string
   emoji: string
 }
 
-/**
- * Send or remove a reaction via YCloud API.
- */
 export async function ycloudSendReaction(
   args: YCloudSendReactionArgs
 ): Promise<YCloudSendResult> {
-  const { to, messageId, emoji } = args
+  const { from, to, messageId, emoji } = args
   const url = `${YCLOUD_API_BASE}/whatsapp/messages`
 
   const body: Record<string, unknown> = {
-    recipient_type: 'individual',
+    from,
     to,
     type: 'reaction',
     reaction: { message_id: messageId, emoji },
