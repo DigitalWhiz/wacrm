@@ -6,7 +6,12 @@ import { mirrorInboundMedia } from '@/lib/whatsapp/mirror-inbound-media'
 import { normalizePhone } from '@/lib/whatsapp/phone-utils'
 import { findExistingContact, isUniqueViolation } from '@/lib/contacts/dedupe'
 import { reopenClosedConversation } from '@/lib/conversations/reopen'
-import { verifyMetaWebhookSignature } from '@/lib/whatsapp/webhook-signature'
+import {
+  verifyMetaWebhookSignature,
+  verifyYCloudWebhookSignature,
+  isYCloudWebhook,
+} from '@/lib/whatsapp/webhook-signature'
+import { convertYCloudToMetaFormat } from '@/lib/whatsapp/ycloud-adapter'
 import { runAutomationsForTrigger } from '@/lib/automations/engine'
 import { dispatchInboundToFlows } from '@/lib/flows/engine'
 import { dispatchInboundToAiReply } from '@/lib/ai/auto-reply'
@@ -181,12 +186,63 @@ export async function GET(request: Request) {
 
 // POST - Receive messages
 export async function POST(request: Request) {
-  // Read raw body first so we can HMAC-verify the exact bytes Meta
+  // Read raw body first so we can HMAC-verify the exact bytes the sender
   // signed. request.json() would re-encode and break the signature.
   const rawBody = await request.text()
-  const signature = request.headers.get('x-hub-signature-256')
 
-  if (!verifyMetaWebhookSignature(rawBody, signature)) {
+  // Detect YCloud vs Meta webhook by checking for YCloud-Signature header
+  const ycloudSignature = request.headers.get('ycloud-signature')
+  const metaSignature = request.headers.get('x-hub-signature-256')
+
+  if (ycloudSignature) {
+    // ---- YCloud webhook path ----
+    if (!verifyYCloudWebhookSignature(rawBody, ycloudSignature)) {
+      console.warn('[webhook] rejected YCloud request with invalid signature')
+      return NextResponse.json({ error: 'Invalid YCloud signature' }, { status: 401 })
+    }
+
+    // Parse YCloud event
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let ycloudEvent: any
+    try {
+      ycloudEvent = JSON.parse(rawBody)
+    } catch {
+      return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
+    }
+
+    // Determine the phone_number_id from the event
+    const phoneNumberId =
+      ycloudEvent.whatsappInboundMessage?.to ||
+      ycloudEvent.whatsappMessage?.to ||
+      ''
+
+    if (!phoneNumberId) {
+      console.warn('[webhook] YCloud event missing phone_number_id')
+      return NextResponse.json({ status: 'ignored' }, { status: 200 })
+    }
+
+    // Convert YCloud format to Meta format
+    const metaBody = convertYCloudToMetaFormat(ycloudEvent, phoneNumberId)
+    if (!metaBody) {
+      // Unrecognized YCloud event type — ack it so YCloud doesn't retry
+      return NextResponse.json({ status: 'ignored' }, { status: 200 })
+    }
+
+    // Process using the same pipeline as Meta webhooks
+    after(async () => {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await processWebhook({ entry: [metaBody] } as any)
+      } catch (error) {
+        console.error('[webhook] Error processing YCloud webhook:', error)
+      }
+    })
+
+    return NextResponse.json({ status: 'received' }, { status: 200 })
+  }
+
+  // ---- Meta webhook path (original) ----
+  if (!verifyMetaWebhookSignature(rawBody, metaSignature)) {
     // 401 (not 200) — we want Meta's delivery dashboard to show failures
     // loudly if a misconfiguration causes signatures to stop matching,
     // rather than silently eating events.
