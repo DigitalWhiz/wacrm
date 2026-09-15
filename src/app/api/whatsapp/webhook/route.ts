@@ -6,12 +6,7 @@ import { mirrorInboundMedia } from '@/lib/whatsapp/mirror-inbound-media'
 import { normalizePhone } from '@/lib/whatsapp/phone-utils'
 import { findExistingContact, isUniqueViolation } from '@/lib/contacts/dedupe'
 import { reopenClosedConversation } from '@/lib/conversations/reopen'
-import {
-  verifyMetaWebhookSignature,
-  verifyYCloudWebhookSignature,
-  isYCloudWebhook,
-} from '@/lib/whatsapp/webhook-signature'
-import { convertYCloudToMetaFormat } from '@/lib/whatsapp/ycloud-adapter'
+import { getInboundAdapter } from '@/lib/whatsapp/transports'
 import { runAutomationsForTrigger } from '@/lib/automations/engine'
 import { dispatchInboundToFlows } from '@/lib/flows/engine'
 import { dispatchInboundToAiReply } from '@/lib/ai/auto-reply'
@@ -190,92 +185,30 @@ export async function POST(request: Request) {
   // signed. request.json() would re-encode and break the signature.
   const rawBody = await request.text()
 
-  // Detect YCloud vs Meta webhook by checking for YCloud-Signature header
-  const ycloudSignature = request.headers.get('ycloud-signature')
-  const metaSignature = request.headers.get('x-hub-signature-256')
+  // Detect provider and get the matching adapter
+  const adapter = getInboundAdapter(request)
 
-  if (ycloudSignature) {
-    // ---- YCloud webhook path ----
-    if (!verifyYCloudWebhookSignature(rawBody, ycloudSignature)) {
-      console.warn('[webhook] rejected YCloud request with invalid signature')
-      return NextResponse.json({ error: 'Invalid YCloud signature' }, { status: 401 })
-    }
-
-    // Parse YCloud event
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let ycloudEvent: any
-    try {
-      ycloudEvent = JSON.parse(rawBody)
-    } catch {
-      return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
-    }
-
-    // Determine the phone_number_id from the event
-    const phoneNumberId =
-      ycloudEvent.whatsappInboundMessage?.to ||
-      ycloudEvent.whatsappMessage?.to ||
-      ''
-
-    if (!phoneNumberId) {
-      console.warn('[webhook] YCloud event missing phone_number_id')
-      return NextResponse.json({ status: 'ignored' }, { status: 200 })
-    }
-
-    // Convert YCloud format to Meta format
-    const metaBody = convertYCloudToMetaFormat(ycloudEvent, phoneNumberId)
-    if (!metaBody) {
-      // Unrecognized YCloud event type — ack it so YCloud doesn't retry
-      return NextResponse.json({ status: 'ignored' }, { status: 200 })
-    }
-
-    // Process using the same pipeline as Meta webhooks
-    after(async () => {
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        await processWebhook({ entry: [metaBody] } as any)
-      } catch (error) {
-        console.error('[webhook] Error processing YCloud webhook:', error)
-      }
-    })
-
-    return NextResponse.json({ status: 'received' }, { status: 200 })
-  }
-
-  // ---- Meta webhook path (original) ----
-  if (!verifyMetaWebhookSignature(rawBody, metaSignature)) {
-    // 401 (not 200) — we want Meta's delivery dashboard to show failures
-    // loudly if a misconfiguration causes signatures to stop matching,
-    // rather than silently eating events.
-    console.warn('[webhook] rejected request with invalid signature')
+  // Verify the webhook signature
+  if (!adapter.verify(rawBody, request)) {
+    const provider = adapter === getInboundAdapter(request) ? 'provider' : 'Meta'
+    console.warn(`[webhook] rejected ${provider} request with invalid signature`)
     return NextResponse.json({ error: 'Invalid signature' }, { status: 401 })
   }
 
-  let body: { entry?: WhatsAppWebhookEntry[] }
-  try {
-    body = JSON.parse(rawBody)
-  } catch {
-    return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
+  // Convert to Meta format
+  const converted = adapter.convert(rawBody)
+  if (!converted) {
+    // Unrecognized event type — ack so the provider doesn't retry
+    return NextResponse.json({ status: 'ignored' }, { status: 200 })
   }
 
-  // Process AFTER the response so we ack Meta within their ~20s timeout
-  // (a slow ack triggers Meta retries + duplicate inserts), while still
-  // guaranteeing the work runs to completion.
-  //
-  // This MUST use `after()` rather than a detached `processWebhook(body)`
-  // promise: on serverless platforms (we run on Vercel) the function can
-  // be frozen or terminated the moment the response is sent, so a floating
-  // promise's DB writes are not guaranteed to finish. That dropped a
-  // non-deterministic *subset* of inbound messages — contacts/conversations
-  // were created but the message insert never landed, leaving conversations
-  // that show in the inbox with an empty thread, and no logs to explain it
-  // (see issue #301). `after()` hands the callback to the runtime, which
-  // keeps the function alive until it resolves (within the route's
-  // maxDuration).
+  // Process using the shared pipeline (same as Meta webhooks)
   after(async () => {
     try {
-      await processWebhook(body)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await processWebhook({ entry: [converted!.metaBody] } as any)
     } catch (error) {
-      console.error('Error processing webhook:', error)
+      console.error('[webhook] Error processing inbound webhook:', error)
     }
   })
 

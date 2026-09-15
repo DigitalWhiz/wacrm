@@ -21,21 +21,8 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 
-import {
-  sendTextMessage,
-  sendTemplateMessage,
-  sendMediaMessage,
-  sendInteractiveButtons,
-  sendInteractiveList,
-  type MediaKind,
-} from '@/lib/whatsapp/meta-api';
-import {
-  ycloudSendTextMessage,
-  ycloudSendTemplateMessage,
-  ycloudSendMediaMessage,
-  ycloudSendInteractiveButtons,
-  ycloudSendInteractiveList,
-} from '@/lib/whatsapp/ycloud-api';
+import type { MediaKind } from '@/lib/whatsapp/meta-api';
+import { getTransport } from '@/lib/whatsapp/transports';
 import {
   validateInteractivePayload,
   interactivePayloadPreviewText,
@@ -343,61 +330,21 @@ export async function sendMessageToConversation(
     sendLanguage = resolved.language;
   }
 
-  // YCloud requires the sender's phone number in E.164 format as the `from` field.
-  // Stored in whatsapp_config.display_phone_number when the user configured WhatsApp.
-  const ycloudFrom = (config as Record<string, unknown>).display_phone_number as string | undefined
-  if (process.env.YCLOUD_API_KEY && !ycloudFrom) {
-    throw new SendMessageError(
-      'whatsapp_not_configured',
-      'WhatsApp display_phone_number not configured. Save your phone number in Settings → WhatsApp.',
-      400
-    );
-  }
+  const transport = getTransport(config)
 
   const attempt = async (phone: string): Promise<string> => {
-    const useYCloud = !!process.env.YCLOUD_API_KEY
-
     if (messageType === 'template') {
-      if (useYCloud) {
-        const result = await ycloudSendTemplateMessage({
-          from: ycloudFrom!,
-          to: phone,
-          templateName: templateName!,
-          language: sendLanguage,
-          params: templateParams || [],
-          contextMessageId,
-        });
-        return result.messageId;
-      }
-      const result = await sendTemplateMessage({
-        phoneNumberId: config.phone_number_id,
-        accessToken,
+      const result = await transport.sendTemplate({
         to: phone,
         templateName: templateName!,
         language: sendLanguage,
-        template: templateRow ?? undefined,
-        messageParams: templateMessageParams ?? undefined,
         params: templateParams || [],
         contextMessageId,
       });
       return result.messageId;
     }
     if (isMediaKind) {
-      if (useYCloud) {
-        const result = await ycloudSendMediaMessage({
-          from: ycloudFrom!,
-          to: phone,
-          kind: messageType as MediaKind,
-          link: mediaUrl!,
-          caption: contentText || undefined,
-          filename: filename || undefined,
-          contextMessageId,
-        });
-        return result.messageId;
-      }
-      const result = await sendMediaMessage({
-        phoneNumberId: config.phone_number_id,
-        accessToken,
+      const result = await transport.sendMedia({
         to: phone,
         kind: messageType as MediaKind,
         link: mediaUrl!,
@@ -409,71 +356,31 @@ export async function sendMessageToConversation(
     }
     if (messageType === 'interactive') {
       const p = interactivePayload!;
-      if (useYCloud) {
-        if (p.kind === 'buttons') {
-          const result = await ycloudSendInteractiveButtons({
-            from: ycloudFrom!,
-            to: phone,
-            body: p.body,
-            buttons: p.buttons.map((b) => ({
-              type: 'reply' as const,
-              reply: { id: b.id, title: b.title },
-            })),
-            contextMessageId,
-          });
-          return result.messageId;
-        }
-        const result = await ycloudSendInteractiveList({
-          from: ycloudFrom!,
+      if (p.kind === 'buttons') {
+        const result = await transport.sendInteractiveButtons({
           to: phone,
           body: p.body,
-          buttonText: p.button_label,
-          sections: p.sections.map((s) => ({
-            title: s.title || '',
-            rows: s.rows,
+          buttons: p.buttons.map((b) => ({
+            id: b.id,
+            title: b.title,
           })),
           contextMessageId,
         });
         return result.messageId;
       }
-      if (p.kind === 'buttons') {
-        const result = await sendInteractiveButtons({
-          phoneNumberId: config.phone_number_id,
-          accessToken,
-          to: phone,
-          bodyText: p.body,
-          headerText: p.header || undefined,
-          footerText: p.footer || undefined,
-          buttons: p.buttons,
-          contextMessageId,
-        });
-        return result.messageId;
-      }
-      const result = await sendInteractiveList({
-        phoneNumberId: config.phone_number_id,
-        accessToken,
+      const result = await transport.sendInteractiveList({
         to: phone,
-        bodyText: p.body,
-        buttonLabel: p.button_label,
-        headerText: p.header || undefined,
-        footerText: p.footer || undefined,
-        sections: p.sections,
+        body: p.body,
+        buttonText: p.button_label,
+        sections: p.sections.map((s) => ({
+          title: s.title || '',
+          rows: s.rows,
+        })),
         contextMessageId,
       });
       return result.messageId;
     }
-    if (useYCloud) {
-      const result = await ycloudSendTextMessage({
-        from: ycloudFrom!,
-        to: phone,
-        text: contentText!,
-        contextMessageId,
-      });
-      return result.messageId;
-    }
-    const result = await sendTextMessage({
-      phoneNumberId: config.phone_number_id,
-      accessToken,
+    const result = await transport.sendText({
       to: phone,
       text: contentText!,
       contextMessageId,
