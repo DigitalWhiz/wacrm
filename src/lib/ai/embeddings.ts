@@ -13,7 +13,8 @@ import { providerHttpError, toNetworkError } from './providers/shared'
 // migration 030.
 // ============================================================
 
-const OPENAI_EMBEDDINGS_URL = 'https://api.openai.com/v1/embeddings'
+const OPENAI_EMBEDDINGS_URL =
+  (process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1') + '/embeddings'
 
 export const EMBEDDING_MODEL = 'text-embedding-3-small'
 export const EMBEDDING_DIMENSIONS = 1536
