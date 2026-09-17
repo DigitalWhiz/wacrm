@@ -7,7 +7,7 @@ import * as path from 'path'
 // Usage: npx tsx scripts/seed-geo-tags.ts <ACCOUNT_ID>
 //
 // Reads NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY from .env
-// and upserts province/state tags into the `tags` table for the given account.
+// and inserts missing province/state tags into the `tags` table for the given account.
 // ---------------------------------------------------------------------------
 
 // ── Data ──────────────────────────────────────────────────────────────────
@@ -177,25 +177,43 @@ async function main() {
 
   const userId = profile?.user_id || account.owner_user_id
 
-  // 3. Build all tags
-  const tags = [
+  // 3. Fetch existing tag names for this account
+  const { data: existingTags } = await supabase
+    .from('tags')
+    .select('name')
+    .eq('account_id', accountId)
+
+  const existingNames = new Set(
+    (existingTags ?? []).map((t: { name: string }) => t.name)
+  )
+
+  console.log(`Existing tags for account: ${existingNames.size}`)
+
+  // 4. Build all geo-tags and filter out ones that already exist
+  const allTags = [
     ...buildTags(ARGENTINA, ARGENTINA_COLOR, accountId, userId),
     ...buildTags(MEXICO, MEXICO_COLOR, accountId, userId),
     ...buildTags(ESPANA, ESPANA_COLOR, accountId, userId),
   ]
 
-  console.log(`Upserting ${tags.length} geo-tags for account ${accountId}...`)
+  const tagsToInsert = allTags.filter((t) => !existingNames.has(t.name))
 
-  // 4. Upsert in batches of 50
+  if (tagsToInsert.length === 0) {
+    console.log('All geo-tags already present. Nothing to insert.')
+    return
+  }
+
+  console.log(
+    `Inserting ${tagsToInsert.length} new geo-tags (${existingNames.size} already existed)...`
+  )
+
+  // 5. Insert in batches of 50
   const BATCH = 50
   let inserted = 0
 
-  for (let i = 0; i < tags.length; i += BATCH) {
-    const batch = tags.slice(i, i + BATCH)
-    const { error } = await supabase.from('tags').upsert(batch, {
-      onConflict: 'name,account_id',
-      ignoreDuplicates: false,
-    })
+  for (let i = 0; i < tagsToInsert.length; i += BATCH) {
+    const batch = tagsToInsert.slice(i, i + BATCH)
+    const { error } = await supabase.from('tags').insert(batch)
 
     if (error) {
       console.error(`Batch ${i / BATCH + 1} failed:`, error.message)
@@ -203,10 +221,10 @@ async function main() {
     }
 
     inserted += batch.length
-    console.log(`  ✓ ${inserted}/${tags.length}`)
+    console.log(`  ✓ ${inserted}/${tagsToInsert.length}`)
   }
 
-  // 5. Summary
+  // 6. Summary
   const { count } = await supabase
     .from('tags')
     .select('*', { count: 'exact', head: true })
