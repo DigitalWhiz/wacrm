@@ -7,7 +7,8 @@ import * as path from 'path'
 // Usage: npx tsx scripts/seed-geo-tags.ts <ACCOUNT_ID>
 //
 // Reads NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY from .env
-// and inserts missing province/state tags into the `tags` table for the given account.
+// Replaces geo-tags with prefixed versions (ARG/MEX/ESP) for visual grouping.
+// Deletes any unprefixed geo-tags first, then inserts the new prefixed ones.
 // ---------------------------------------------------------------------------
 
 // ── Data ──────────────────────────────────────────────────────────────────
@@ -119,13 +120,14 @@ function loadEnv() {
 
 function buildTags(
   names: string[],
+  prefix: string,
   color: string,
   accountId: string,
   userId: string
 ) {
   return names.map((name) => ({
     user_id: userId,
-    name,
+    name: `${prefix} - ${name}`,
     color,
     account_id: accountId,
   }))
@@ -177,10 +179,10 @@ async function main() {
 
   const userId = profile?.user_id || account.owner_user_id
 
-  // 3. Fetch existing tag names for this account
+  // 3. Fetch all existing tags for this account
   const { data: existingTags } = await supabase
     .from('tags')
-    .select('name')
+    .select('id, name')
     .eq('account_id', accountId)
 
   const existingNames = new Set(
@@ -189,25 +191,57 @@ async function main() {
 
   console.log(`Existing tags for account: ${existingNames.size}`)
 
-  // 4. Build all geo-tags and filter out ones that already exist
+  // 4. Delete unprefixed geo-tags (from previous runs)
+  const unprefixedNames = new Set([
+    ...ARGENTINA,
+    ...MEXICO,
+    ...ESPANA,
+  ])
+
+  const idsToDelete = (existingTags ?? [])
+    .filter((t: { name: string }) => unprefixedNames.has(t.name))
+    .map((t: { id: string }) => t.id)
+
+  if (idsToDelete.length > 0) {
+    console.log(`Deleting ${idsToDelete.length} old unprefixed geo-tags...`)
+    const { error: delErr } = await supabase
+      .from('tags')
+      .delete()
+      .in('id', idsToDelete)
+
+    if (delErr) {
+      console.error('Failed to delete old tags:', delErr.message)
+      process.exit(1)
+    }
+
+    // Remove from existingNames so we don't skip re-inserting
+    for (const id of idsToDelete) {
+      const tag = (existingTags ?? []).find(
+        (t: { id: string }) => t.id === id
+      )
+      if (tag) existingNames.delete(tag.name)
+    }
+  }
+
+  // 5. Build all prefixed geo-tags and filter out ones that already exist
   const allTags = [
-    ...buildTags(ARGENTINA, ARGENTINA_COLOR, accountId, userId),
-    ...buildTags(MEXICO, MEXICO_COLOR, accountId, userId),
-    ...buildTags(ESPANA, ESPANA_COLOR, accountId, userId),
+    ...buildTags(ARGENTINA, 'ARG', ARGENTINA_COLOR, accountId, userId),
+    ...buildTags(MEXICO, 'MEX', MEXICO_COLOR, accountId, userId),
+    ...buildTags(ESPANA, 'ESP', ESPANA_COLOR, accountId, userId),
   ]
 
   const tagsToInsert = allTags.filter((t) => !existingNames.has(t.name))
 
   if (tagsToInsert.length === 0) {
-    console.log('All geo-tags already present. Nothing to insert.')
+    console.log('All prefixed geo-tags already present. Nothing to insert.')
     return
   }
 
   console.log(
-    `Inserting ${tagsToInsert.length} new geo-tags (${existingNames.size} already existed)...`
+    `Inserting ${tagsToInsert.length} prefixed geo-tags...`
   )
 
-  // 5. Insert in batches of 50
+  // 6. Insert in batches of 50
   const BATCH = 50
   let inserted = 0
 
@@ -224,14 +258,14 @@ async function main() {
     console.log(`  ✓ ${inserted}/${tagsToInsert.length}`)
   }
 
-  // 6. Summary
+  // 7. Summary
   const { count } = await supabase
     .from('tags')
     .select('*', { count: 'exact', head: true })
     .eq('account_id', accountId)
 
   console.log(`\nDone! Total tags in account: ${count}`)
-  console.log('Countries seeded: Argentina, México, España')
+  console.log('Countries seeded: Argentina (ARG), México (MEX), España (ESP)')
 }
 
 main().catch((err) => {
